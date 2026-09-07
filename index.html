@@ -50,7 +50,7 @@
       outline-offset: 2px;
     }
 
-    #sky, #photo, #veil, #flash {
+    #sky, #photo, #bgVideo, #veil, #flash {
       position: fixed;
       inset: 0;
       pointer-events: none;
@@ -62,7 +62,16 @@
       opacity: 0;
       transition: opacity 0.6s ease, transform 18s ease;
     }
+    #bgVideo {
+      z-index: 1;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      opacity: 0;
+      background: #120806;
+    }
     body.bg-photo #photo { opacity: 1; }
+    body.bg-video #bgVideo { opacity: 1; }
     body.bg-photo.drift #photo { animation: ken 48s ease-in-out infinite alternate; }
     @keyframes ken {
       from { transform: scale(1) translate(0, 0); }
@@ -216,6 +225,7 @@
       min-width: 120px;
     }
     .ghost:disabled { opacity: 0.4; }
+    .video-ctl[hidden] { display: none; }
     .start {
       width: min(38vw, 148px);
       height: min(38vw, 148px);
@@ -366,6 +376,36 @@
       display: none;
     }
     .oneshot-live.show { display: block; }
+    .vlist { display: grid; gap: 8px; }
+    .vitem {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(0, 0, 0, 0.22);
+      text-align: left;
+      width: 100%;
+      touch-action: manipulation;
+    }
+    .vitem.on { border-color: var(--saffron); color: var(--gold-2); }
+    .vitem .vname {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 0.82rem;
+    }
+    .vitem .x {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      border: 1px solid var(--line);
+      color: var(--gold);
+      flex-shrink: 0;
+    }
 
     @media (min-width: 720px) {
       dialog {
@@ -382,6 +422,7 @@
 <body>
   <canvas id="sky"></canvas>
   <div id="photo"></div>
+  <video id="bgVideo" playsinline webkit-playsinline muted loop preload="metadata" disablepictureinpicture></video>
   <div id="veil"></div>
   <div id="flash"></div>
 
@@ -415,6 +456,7 @@
 
     <div class="dock">
       <button class="start" id="toggle" type="button">शुरू <span>START</span></button>
+      <button class="ghost video-ctl" id="videoToggle" type="button" hidden>Pause video</button>
       <div class="dock-row">
         <button class="ghost" id="resetCount" type="button">Reset count</button>
         <button class="ghost" id="undo" type="button">Undo bead</button>
@@ -507,6 +549,21 @@
             <span class="file-name" id="photoName">none</span>
           </div>
         </div>
+        <div class="stack" id="videoWrap">
+          <span>Motivation videos from this device</span>
+          <p class="note">Pick one or many. They play as wallpaper. Stay muted if you want the jaap voice to stay clear.</p>
+          <div class="file">
+            <button class="quiet" id="videoBtn" type="button">Add videos</button>
+            <input id="videoFile" type="file" accept="video/*,.mp4,.mov,.m4v,.webm,.mkv" multiple />
+          </div>
+          <div class="chips" id="videoPlayModes"></div>
+          <label class="row">Mute video sound <input id="videoMute" type="checkbox" /></label>
+          <div class="actions">
+            <button class="quiet" id="videoPauseBtn" type="button">Pause video</button>
+          </div>
+          <div class="vlist" id="videoList"></div>
+          <p class="note" id="videoNote"></p>
+        </div>
         <label class="row">
           <span>Dark overlay</span>
           <input id="overlay" type="range" min="0.1" max="0.8" step="0.01" />
@@ -564,6 +621,9 @@
       wakeLock: true,
       flashOn: true,
       vibrate: true,
+      videoMute: true,
+      videoPlay: "loop",
+      videoCurrentId: "",
       intervalFileName: "",
       oneshotFileName: "",
       photoName: "",
@@ -580,6 +640,9 @@
       intervalUrl: "",
       oneshotUrl: "",
       photoUrl: "",
+      videos: [],
+      videoNote: "",
+      videoPaused: false,
       audio: { interval: null, oneshot: null },
       lastNext: "",
     };
@@ -601,8 +664,12 @@
 
     function dbOpen() {
       return new Promise((resolve, reject) => {
-        const req = indexedDB.open("jap-deep", 1);
-        req.onupgradeneeded = () => req.result.createObjectStore("media");
+        const req = indexedDB.open("jap-deep", 2);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains("media")) db.createObjectStore("media");
+          if (!db.objectStoreNames.contains("videos")) db.createObjectStore("videos", { keyPath: "id" });
+        };
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });
@@ -622,6 +689,37 @@
         const tx = db.transaction("media", "readonly");
         const req = tx.objectStore("media").get(key);
         req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+    function newId() {
+      return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    }
+    async function dbPutVideo(item) {
+      const db = await dbOpen();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction("videos", "readwrite");
+        tx.objectStore("videos").put({ id: item.id, name: item.name, type: item.blob.type, blob: item.blob });
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+    async function dbDeleteVideo(id) {
+      const db = await dbOpen();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction("videos", "readwrite");
+        tx.objectStore("videos").delete(id);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+    async function dbAllVideos() {
+      const db = await dbOpen();
+      if (!db.objectStoreNames.contains("videos")) return [];
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction("videos", "readonly");
+        const req = tx.objectStore("videos").getAll();
+        req.onsuccess = () => resolve(req.result || []);
         req.onerror = () => reject(req.error);
       });
     }
@@ -731,7 +829,15 @@
       return true;
     }
 
+    function dipVideo() {
+      const el = $("bgVideo");
+      if (!el || el.paused || el.muted) return;
+      el.volume = 0.12;
+      clearTimeout(el._dip);
+      el._dip = setTimeout(() => { el.volume = 0.4; }, 1800);
+    }
     function triggerSound(kind, which) {
+      dipVideo();
       if (state.settings.flashOn) {
         document.body.classList.add("flash");
         setTimeout(() => document.body.classList.remove("flash"), 280);
@@ -772,13 +878,121 @@
     function applyBackground() {
       const s = state.settings;
       document.body.classList.toggle("bg-photo", s.bgMode === "photo" && !!state.photoUrl);
+      document.body.classList.toggle("bg-video", s.bgMode === "video" && state.videos.length > 0);
       document.body.classList.toggle("drift", s.bgMode === "photo");
       $("photo").style.backgroundImage = s.bgMode === "photo" && state.photoUrl ? `url("${state.photoUrl}")` : "";
       document.documentElement.style.setProperty("--overlay", String(s.overlay));
       $("presetWrap").style.display = s.bgMode === "static" ? "grid" : "none";
       $("photoWrap").style.display = s.bgMode === "photo" ? "grid" : "none";
+      $("videoWrap").style.display = s.bgMode === "video" ? "grid" : "none";
       document.querySelectorAll(".preset").forEach((btn) => btn.classList.toggle("on", btn.dataset.key === s.bgPreset));
       document.querySelectorAll("#bgModes .chip").forEach((btn) => btn.classList.toggle("on", btn.dataset.mode === s.bgMode));
+      document.querySelectorAll("#videoPlayModes .chip").forEach((btn) => btn.classList.toggle("on", btn.dataset.play === s.videoPlay));
+      ensureVideo();
+      syncVideoCtl();
+    }
+    function syncVideoCtl() {
+      const on = state.settings.bgMode === "video" && state.videos.length > 0;
+      const label = state.videoPaused ? "Play video" : "Pause video";
+      $("videoToggle").hidden = !on;
+      $("videoToggle").textContent = label;
+      $("videoPauseBtn").textContent = label;
+    }
+    function setVideoPaused(paused) {
+      state.videoPaused = !!paused;
+      ensureVideo();
+      syncVideoCtl();
+    }
+    function renderVideoList() {
+      const box = $("videoList");
+      if (!state.videos.length) {
+        box.innerHTML = `<p class="note">No video yet. Add one from your gallery.</p>`;
+      } else {
+        box.innerHTML = state.videos.map((v) => `
+          <div class="vitem${v.id === state.settings.videoCurrentId ? " on" : ""}" data-id="${v.id}">
+            <button class="vname" type="button" data-pick="${v.id}">${v.name}</button>
+            <button class="x" type="button" data-del="${v.id}" aria-label="Remove">×</button>
+          </div>
+        `).join("");
+      }
+      $("videoNote").textContent = state.videoNote;
+    }
+    function nextVideo() {
+      if (state.videos.length < 2) {
+        const el = $("bgVideo");
+        el.currentTime = 0;
+        el.play().catch(() => {});
+        return;
+      }
+      let idx = state.videos.findIndex((v) => v.id === state.settings.videoCurrentId);
+      if (idx < 0) idx = 0;
+      if (state.settings.videoPlay === "shuffle") {
+        let n = idx;
+        while (n === idx) n = Math.floor(Math.random() * state.videos.length);
+        idx = n;
+      } else {
+        idx = (idx + 1) % state.videos.length;
+      }
+      state.settings.videoCurrentId = state.videos[idx].id;
+      saveSettings();
+      renderVideoList();
+      ensureVideo(true);
+    }
+    function ensureVideo(force) {
+      const el = $("bgVideo");
+      if (state.settings.bgMode !== "video" || !state.videos.length) {
+        el.pause();
+        if (el.dataset.id) {
+          el.removeAttribute("src");
+          el.load();
+          delete el.dataset.id;
+        }
+        return;
+      }
+      const item = state.videos.find((v) => v.id === state.settings.videoCurrentId) || state.videos[0];
+      state.settings.videoCurrentId = item.id;
+      el.muted = !!state.settings.videoMute;
+      el.volume = state.settings.videoMute ? 0 : 0.4;
+      el.loop = state.settings.videoPlay === "loop" || state.videos.length === 1;
+      if (force || el.dataset.id !== item.id) {
+        el.dataset.id = item.id;
+        el.src = item.url;
+      }
+      if (state.videoPaused) el.pause();
+      else el.play().catch(() => {});
+    }
+    async function addVideos(files) {
+      const incoming = [...files];
+      if (!incoming.length) return;
+      const skipped = [];
+      for (const file of incoming) {
+        if (state.videos.length >= 12) { skipped.push("limit 12"); break; }
+        if (file.size > 220 * 1024 * 1024) { skipped.push(file.name + " too big"); continue; }
+        const item = { id: newId(), name: file.name || "video", url: URL.createObjectURL(file), blob: file };
+        state.videos.push(item);
+        try { await dbPutVideo(item); }
+        catch (_) { state.videoNote = "Some videos will play now, but may not stay after you close the tab (storage full)."; }
+      }
+      if (!state.settings.videoCurrentId && state.videos[0]) state.settings.videoCurrentId = state.videos[0].id;
+      state.settings.bgMode = "video";
+      state.videoPaused = false;
+      if (skipped.length && !state.videoNote) state.videoNote = "Skipped: " + skipped.join(", ");
+      else if (!skipped.length && !state.videoNote) state.videoNote = `${state.videos.length} video${state.videos.length > 1 ? "s" : ""} on this device.`;
+      saveSettings();
+      renderVideoList();
+      applyBackground();
+      paintForm();
+    }
+    async function removeVideo(id) {
+      const item = state.videos.find((v) => v.id === id);
+      if (item && item.url) URL.revokeObjectURL(item.url);
+      state.videos = state.videos.filter((v) => v.id !== id);
+      try { await dbDeleteVideo(id); } catch (_) {}
+      if (state.settings.videoCurrentId === id) state.settings.videoCurrentId = state.videos[0] ? state.videos[0].id : "";
+      state.videoNote = state.videos.length ? `${state.videos.length} video${state.videos.length > 1 ? "s" : ""} on this device.` : "";
+      saveSettings();
+      renderVideoList();
+      applyBackground();
     }
 
     function syncSoundWraps() {
@@ -805,8 +1019,10 @@
       $("intervalFileName").textContent = s.intervalFileName || "none";
       $("oneshotFileName").textContent = s.oneshotFileName || "none";
       $("photoName").textContent = s.photoName || "none";
+      $("videoMute").checked = s.videoMute;
       document.querySelectorAll("#intervalPresets .chip").forEach((b) => b.classList.toggle("on", Number(b.dataset.sec) === Number(s.intervalSec)));
       syncSoundWraps();
+      renderVideoList();
       applyBackground();
     }
 
@@ -827,6 +1043,7 @@
       $("toggle").innerHTML = `विराम <span>PAUSE</span>`;
       document.body.classList.add("running");
       $("hint").textContent = "Lamp is on. A voice will return at the interval.";
+      ensureVideo();
       await holdWake();
     }
     async function pauseLamp() {
@@ -881,7 +1098,7 @@
       const w = innerWidth, h = innerHeight;
       const mode = state.settings.bgMode;
       const p = PRESETS[state.settings.bgPreset] || PRESETS.diya;
-      if (mode === "photo") {
+      if (mode === "photo" || mode === "video") {
         sctx.fillStyle = "#120806";
         sctx.fillRect(0, 0, w, h);
         return;
@@ -934,6 +1151,22 @@
         if (oneshot) await readAudio(oneshot, "oneshot");
         const photo = await dbGet("photo");
         if (photo) await setPhoto(photo);
+        const saved = await dbAllVideos();
+        saved.forEach((row) => {
+          if (!row || !row.blob) return;
+          state.videos.push({
+            id: row.id,
+            name: row.name || "video",
+            url: URL.createObjectURL(row.blob),
+            blob: row.blob,
+          });
+        });
+        if (state.videos.length) {
+          if (!state.videos.some((v) => v.id === state.settings.videoCurrentId)) {
+            state.settings.videoCurrentId = state.videos[0].id;
+          }
+          state.videoNote = `${state.videos.length} video${state.videos.length > 1 ? "s" : ""} on this device.`;
+        }
       } catch (_) {}
     }
 
@@ -990,6 +1223,7 @@
       s.wakeLock = $("wakeLock").checked;
       s.flashOn = $("flashOn").checked;
       s.vibrate = $("vibrate").checked;
+      s.videoMute = $("videoMute").checked;
       saveSettings();
       syncSoundWraps();
       applyBackground();
@@ -1008,7 +1242,13 @@
         ["auto", "Automatic light"],
         ["static", "Static colour"],
         ["photo", "My image"],
+        ["video", "My videos"],
       ].map(([mode, label]) => `<button class="chip" type="button" data-mode="${mode}">${label}</button>`).join("");
+      $("videoPlayModes").innerHTML = [
+        ["loop", "Loop this one"],
+        ["sequence", "Play all, one after another"],
+        ["shuffle", "Shuffle"],
+      ].map(([play, label]) => `<button class="chip" type="button" data-play="${play}">${label}</button>`).join("");
       $("presets").innerHTML = Object.entries(PRESETS).map(([key, p]) =>
         `<button class="preset" type="button" data-key="${key}" style="background:radial-gradient(circle at 50% 20%, ${p.c}, ${p.a} 40%, ${p.b})">${key}</button>`
       ).join("");
@@ -1068,16 +1308,44 @@
         applyBackground();
         paintForm();
       };
-      ["intervalSec","intervalSound","intervalText","oneshotSound","oneshotText","oneshotDelay","volume","beads","overlay","wakeLock","flashOn","vibrate"]
+      ["intervalSec","intervalSound","intervalText","oneshotSound","oneshotText","oneshotDelay","volume","beads","overlay","wakeLock","flashOn","vibrate","videoMute"]
         .forEach((id) => $(id).addEventListener("change", readFields));
       $("intervalSound").addEventListener("change", syncSoundWraps);
       $("oneshotSound").addEventListener("change", syncSoundWraps);
       $("intervalFileBtn").onclick = () => $("intervalFile").click();
       $("oneshotFileBtn").onclick = () => $("oneshotFile").click();
       $("photoBtn").onclick = () => $("photoFile").click();
+      $("videoBtn").onclick = () => $("videoFile").click();
       $("intervalFile").onchange = () => { if ($("intervalFile").files[0]) readAudio($("intervalFile").files[0], "interval"); };
       $("oneshotFile").onchange = () => { if ($("oneshotFile").files[0]) readAudio($("oneshotFile").files[0], "oneshot"); };
       $("photoFile").onchange = () => { if ($("photoFile").files[0]) setPhoto($("photoFile").files[0]); };
+      $("videoFile").onchange = () => { if ($("videoFile").files.length) addVideos($("videoFile").files); $("videoFile").value = ""; };
+      $("videoPlayModes").onclick = (e) => {
+        const btn = e.target.closest("[data-play]");
+        if (!btn) return;
+        state.settings.videoPlay = btn.dataset.play;
+        saveSettings();
+        applyBackground();
+        paintForm();
+      };
+      $("videoList").onclick = (e) => {
+        const del = e.target.closest("[data-del]");
+        if (del) { removeVideo(del.dataset.del); return; }
+        const pick = e.target.closest("[data-pick]");
+        if (pick) {
+          state.settings.videoCurrentId = pick.dataset.pick;
+          state.videoPaused = false;
+          saveSettings();
+          renderVideoList();
+          ensureVideo(true);
+          syncVideoCtl();
+        }
+      };
+      $("videoToggle").onclick = () => setVideoPaused(!state.videoPaused);
+      $("videoPauseBtn").onclick = () => setVideoPaused(!state.videoPaused);
+      $("bgVideo").addEventListener("ended", () => {
+        if (state.settings.bgMode === "video" && !state.videoPaused) nextVideo();
+      });
       $("previewInterval").onclick = async () => { await unlockAudio(); triggerSound(state.settings.intervalSound, "interval"); };
       $("previewOneshot").onclick = async () => { await unlockAudio(); triggerSound(state.settings.oneshotSound, "oneshot"); };
       $("scheduleOneshot").onclick = async () => {
@@ -1098,7 +1366,10 @@
         $("oneshotLive").classList.remove("show");
       };
       document.addEventListener("visibilitychange", () => {
-        if (!document.hidden) holdWake();
+        if (!document.hidden) {
+          holdWake();
+          if (state.settings.bgMode === "video") ensureVideo();
+        }
       });
     }
 
