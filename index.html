@@ -551,7 +551,7 @@
         </div>
         <div class="stack" id="videoWrap">
           <span>Motivation videos from this device</span>
-          <p class="note">Pick one or many. They play as wallpaper. Stay muted if you want the jaap voice to stay clear.</p>
+          <p class="note">Add as many as you like, one at a time or together. They play as wallpaper. Mute the video if you want the jaap voice to stay clear.</p>
           <div class="file">
             <button class="quiet" id="videoBtn" type="button">Add videos</button>
             <input id="videoFile" type="file" accept="video/*,.mp4,.mov,.m4v,.webm,.mkv" multiple />
@@ -916,6 +916,7 @@
         `).join("");
       }
       $("videoNote").textContent = state.videoNote;
+      $("videoBtn").textContent = state.videos.length ? "Add more videos" : "Add videos";
     }
     function nextVideo() {
       if (state.videos.length < 2) {
@@ -961,23 +962,29 @@
       if (state.videoPaused) el.pause();
       else el.play().catch(() => {});
     }
+    function videoCountNote() {
+      const n = state.videos.length;
+      const session = state.videos.filter((v) => v.sessionOnly).length;
+      let msg = n ? `${n} video${n > 1 ? "s" : ""} added. Tap Add more videos anytime.` : "";
+      if (session) msg += ` ${session} will play now, but may not stay after you close the tab (phone storage).`;
+      state.videoNote = msg;
+    }
     async function addVideos(files) {
       const incoming = [...files];
       if (!incoming.length) return;
-      const skipped = [];
       for (const file of incoming) {
-        if (state.videos.length >= 12) { skipped.push("limit 12"); break; }
-        if (file.size > 220 * 1024 * 1024) { skipped.push(file.name + " too big"); continue; }
-        const item = { id: newId(), name: file.name || "video", url: URL.createObjectURL(file), blob: file };
+        const item = { id: newId(), name: file.name || "video", url: URL.createObjectURL(file), blob: file, sessionOnly: false };
+        try {
+          await dbPutVideo(item);
+        } catch (_) {
+          item.sessionOnly = true;
+        }
         state.videos.push(item);
-        try { await dbPutVideo(item); }
-        catch (_) { state.videoNote = "Some videos will play now, but may not stay after you close the tab (storage full)."; }
       }
       if (!state.settings.videoCurrentId && state.videos[0]) state.settings.videoCurrentId = state.videos[0].id;
       state.settings.bgMode = "video";
       state.videoPaused = false;
-      if (skipped.length && !state.videoNote) state.videoNote = "Skipped: " + skipped.join(", ");
-      else if (!skipped.length && !state.videoNote) state.videoNote = `${state.videos.length} video${state.videos.length > 1 ? "s" : ""} on this device.`;
+      videoCountNote();
       saveSettings();
       renderVideoList();
       applyBackground();
@@ -989,7 +996,7 @@
       state.videos = state.videos.filter((v) => v.id !== id);
       try { await dbDeleteVideo(id); } catch (_) {}
       if (state.settings.videoCurrentId === id) state.settings.videoCurrentId = state.videos[0] ? state.videos[0].id : "";
-      state.videoNote = state.videos.length ? `${state.videos.length} video${state.videos.length > 1 ? "s" : ""} on this device.` : "";
+      videoCountNote();
       saveSettings();
       renderVideoList();
       applyBackground();
@@ -1165,7 +1172,7 @@
           if (!state.videos.some((v) => v.id === state.settings.videoCurrentId)) {
             state.settings.videoCurrentId = state.videos[0].id;
           }
-          state.videoNote = `${state.videos.length} video${state.videos.length > 1 ? "s" : ""} on this device.`;
+          videoCountNote();
         }
       } catch (_) {}
     }
